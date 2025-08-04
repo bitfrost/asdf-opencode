@@ -33,7 +33,14 @@ get_platform() {
 
 get_arch() {
   local arch=$(uname -m)
-  echo $arch
+  case $arch in
+    x86_64|amd64
+      echo "x64"
+      ;;
+    *)
+      echo $arch
+      ;;
+  esac
 }
 
 get_download_url() {
