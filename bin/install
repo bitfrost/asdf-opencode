@@ -15,15 +15,18 @@ install_opencode() {
   local download_url="$(get_download_url $version)"
 
   local platform="$(get_platform)"
-  local arch="$(get_arch)"
 
   mkdir -p "${install_path}"
   mkdir -p "${bin_install_path}"
   local bin_path="${bin_install_path}/opencode"
   echo "downloading opencode ${download_url}"
-    curl -L -s "$download_url" | funzip > "${install_path}"/opencode
+  if [ "$platform" = "linux" ]; then
+    curl -sL "$download_url" | tar -xz -C "${install_path}"
+  else
+    curl -L -s "$download_url" | funzip > "${install_path}/opencode"
+  fi
   mv "${install_path}/opencode" "${bin_install_path}/opencode"
-  chmod +x $bin_path
+  chmod +x "$bin_path"
 }
 
 get_platform() {
@@ -48,7 +51,11 @@ get_download_url() {
   local version="$1"
   local platform="$(get_platform)"
   local arch="$(get_arch)"
-  echo "https://github.com/sst/opencode/releases/download/v${version}/opencode-${platform}-${arch}.zip"
+  local ext="zip"
+  if [ "$platform" = "linux" ]; then
+    ext="tar.gz"
+  fi
+  echo "https://github.com/sst/opencode/releases/download/v${version}/opencode-${platform}-${arch}.${ext}"
 }
 
 install_opencode $ASDF_INSTALL_TYPE $ASDF_INSTALL_VERSION $ASDF_INSTALL_PATH
