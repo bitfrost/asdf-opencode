@@ -8,19 +8,31 @@ TMPDIR=${TMPDIR:-/tmp}
 [ -n "$ASDF_INSTALL_VERSION" ] || (>&2 echo 'Missing ASDF_INSTALL_VERSION' && exit 1)
 [ -n "$ASDF_INSTALL_PATH" ] || (>&2 echo 'Missing ASDF_INSTALL_PATH' && exit 1)
 
+# Compare two semantic versions using portable sort
+# Returns 0 if version1 >= version2, 1 otherwise
+version_gte() {
+  local version1=$1
+  local version2=$2
+  # Use portable version sorting (same logic as sort_versions in list-all)
+  local sorted_first
+  sorted_first=$(printf '%s\n%s\n' "$version1" "$version2" | \
+    sed 'h; s/[+-]/./g; s/.p\([[:digit:]]\)/.z\1/; s/$/.z/; G; s/\n/ /' | \
+    LC_ALL=C sort -t. -k 1,1 -k 2,2n -k 3,3n -k 4,4n -k 5,5n | \
+    awk 'NR==1 {print $2}')
+  [ "$sorted_first" = "$version2" ]
+}
+
 install_opencode() {
   local version=$2
   local install_path=$3
   local bin_install_path="$install_path/bin"
   local download_url="$(get_download_url $version)"
 
-  local platform="$(get_platform)"
-
   mkdir -p "${install_path}"
   mkdir -p "${bin_install_path}"
   local bin_path="${bin_install_path}/opencode"
   echo "downloading opencode ${download_url}"
-  if [ "$platform" = "linux" ]; then
+  if [[ "$download_url" == *.tar.gz ]]; then
     curl -sL "$download_url" | tar -xz -C "${install_path}"
   else
     curl -L -s "$download_url" | funzip > "${install_path}/opencode"
@@ -52,9 +64,14 @@ get_download_url() {
   local platform="$(get_platform)"
   local arch="$(get_arch)"
   local ext="zip"
+
+  # Linux switched from .zip to .tar.gz starting with v1.0.92
   if [ "$platform" = "linux" ]; then
-    ext="tar.gz"
+    if version_gte "$version" "1.0.92"; then
+      ext="tar.gz"
+    fi
   fi
+
   echo "https://github.com/sst/opencode/releases/download/v${version}/opencode-${platform}-${arch}.${ext}"
 }
 
