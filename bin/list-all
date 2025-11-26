@@ -17,7 +17,7 @@ while [ -n "${next_link}" ]; do
   cmd_out=$(eval "${cmd}" 2>&1)
 
   # Get versions
-  versions=$(echo "${cmd_out}" | grep "\"tag_name\":" | sed 's/^ *"tag_name"\: *"v\?\(.*\)", *$/\1/')
+  versions=$(echo "${cmd_out}" | grep tag_name | cut -d'"' -f4 | sed 's/^v//')
   all_versions="${versions}\n${all_versions}"
 
   # Get next link
