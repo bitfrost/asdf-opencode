@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
 
-set -e
-set -o pipefail
+set -euo pipefail
 
-ASDF_INSTALL_TYPE=${ASDF_INSTALL_TYPE:-version  }
+ASDF_INSTALL_TYPE=${ASDF_INSTALL_TYPE:-version}
 TMPDIR=${TMPDIR:-/tmp}
-[ -n "$ASDF_INSTALL_VERSION" ] || (>&2 echo 'Missing ASDF_INSTALL_VERSION' && exit 1)
-[ -n "$ASDF_INSTALL_PATH" ] || (>&2 echo 'Missing ASDF_INSTALL_PATH' && exit 1)
+[ -n "${ASDF_INSTALL_VERSION:-}" ] || { echo 'Missing ASDF_INSTALL_VERSION' >&2; exit 1; }
+[ -n "${ASDF_INSTALL_PATH:-}" ] || { echo 'Missing ASDF_INSTALL_PATH' >&2; exit 1; }
 
 # Compare two semantic versions using portable sort
 # Returns 0 if version1 >= version2, 1 otherwise
 version_gte() {
-  local version1=$1
-  local version2=$2
+  local version1="$1"
+  local version2="$2"
   # Use portable version sorting (same logic as sort_versions in list-all)
   local sorted_first
   sorted_first=$(printf '%s\n%s\n' "$version1" "$version2" | \
@@ -22,48 +21,31 @@ version_gte() {
   [ "$sorted_first" = "$version2" ]
 }
 
-install_opencode() {
-  local version=$2
-  local install_path=$3
-  local bin_install_path="$install_path/bin"
-  local download_url="$(get_download_url $version)"
-
-  mkdir -p "${install_path}"
-  mkdir -p "${bin_install_path}"
-  local bin_path="${bin_install_path}/opencode"
-  echo "downloading opencode ${download_url}"
-  if [[ "$download_url" == *.tar.gz ]]; then
-    curl -sL "$download_url" | tar -xz -C "${install_path}"
-  else
-    curl -L -s "$download_url" | funzip > "${install_path}/opencode"
-  fi
-  mv "${install_path}/opencode" "${bin_install_path}/opencode"
-  chmod +x "$bin_path"
-}
-
 get_platform() {
-  local platform=$(uname | tr 'A-Z' 'a-z')
-  echo $platform
+  uname | tr '[:upper:]' '[:lower:]'
 }
 
 get_arch() {
-  local arch=$(uname -m)
-  case $arch in
+  local arch
+  arch=$(uname -m)
+  case "$arch" in
     x86_64|amd64)
       echo "x64"
       ;;
     *)
-      echo $arch
+      echo "$arch"
       ;;
   esac
 }
 
-
 get_download_url() {
   local version="$1"
-  local platform="$(get_platform)"
-  local arch="$(get_arch)"
+  local platform
+  local arch
   local ext="zip"
+
+  platform="$(get_platform)"
+  arch="$(get_arch)"
 
   # Linux switched from .zip to .tar.gz starting with v1.0.92
   if [ "$platform" = "linux" ]; then
@@ -75,4 +57,44 @@ get_download_url() {
   echo "https://github.com/sst/opencode/releases/download/v${version}/opencode-${platform}-${arch}.${ext}"
 }
 
-install_opencode $ASDF_INSTALL_TYPE $ASDF_INSTALL_VERSION $ASDF_INSTALL_PATH
+install_opencode() {
+  local install_type="$1"
+  local version="$2"
+  local install_path="$3"
+  local bin_install_path="${install_path}/bin"
+  local download_url
+
+  download_url="$(get_download_url "$version")"
+
+  # Create a secure temporary directory for download
+  # Use global variable so trap can access it
+  TMP_DOWNLOAD_DIR=$(mktemp -d "${TMPDIR}/asdf-opencode.XXXXXX")
+  trap 'rm -rf "${TMP_DOWNLOAD_DIR:-}"' EXIT
+
+  mkdir -p "$install_path"
+  mkdir -p "$bin_install_path"
+
+  local bin_path="${bin_install_path}/opencode"
+
+  echo "Downloading opencode from ${download_url}"
+
+  # Note: Upstream does not publish checksums, so verification is not possible.
+  # Using --fail to error on HTTP failures instead of downloading error pages.
+  if [[ "$download_url" == *.tar.gz ]]; then
+    curl -fSL "$download_url" -o "${TMP_DOWNLOAD_DIR}/opencode.tar.gz"
+    tar -xzf "${TMP_DOWNLOAD_DIR}/opencode.tar.gz" -C "$TMP_DOWNLOAD_DIR"
+  else
+    curl -fSL "$download_url" -o "${TMP_DOWNLOAD_DIR}/opencode.zip"
+    funzip "${TMP_DOWNLOAD_DIR}/opencode.zip" > "${TMP_DOWNLOAD_DIR}/opencode"
+  fi
+
+  mv "${TMP_DOWNLOAD_DIR}/opencode" "$bin_path"
+  chmod +x "$bin_path"
+
+  rm -rf "$TMP_DOWNLOAD_DIR"
+  trap - EXIT
+
+  echo "opencode ${version} installed to ${bin_path}"
+}
+
+install_opencode "$ASDF_INSTALL_TYPE" "$ASDF_INSTALL_VERSION" "$ASDF_INSTALL_PATH"
