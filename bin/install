@@ -54,7 +54,7 @@ get_download_url() {
     fi
   fi
 
-  echo "https://github.com/sst/opencode/releases/download/v${version}/opencode-${platform}-${arch}.${ext}"
+  echo "https://github.com/anomalyco/opencode/releases/download/v${version}/opencode-${platform}-${arch}.${ext}"
 }
 
 install_opencode() {
