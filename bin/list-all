@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-releases_path="https://api.github.com/repos/sst/opencode/releases"
+releases_path="https://api.github.com/repos/anomalyco/opencode/releases"
 
 # Build curl arguments as an array to avoid eval
 curl_args=(--retry 10 --retry-delay 2 -sfS)
