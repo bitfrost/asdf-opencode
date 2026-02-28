@@ -88,7 +88,10 @@ install_opencode() {
     tar -xzf "${TMP_DOWNLOAD_DIR}/opencode.tar.gz" -C "$TMP_DOWNLOAD_DIR"
   else
     curl -fSL "$download_url" -o "${TMP_DOWNLOAD_DIR}/opencode.zip"
-    funzip "${TMP_DOWNLOAD_DIR}/opencode.zip" > "${TMP_DOWNLOAD_DIR}/opencode"
+    if ! unzip -p "${TMP_DOWNLOAD_DIR}/opencode.zip" "opencode" > "${TMP_DOWNLOAD_DIR}/opencode"; then
+      echo "Failed to extract opencode from zip" >&2
+      exit 1
+    fi
   fi
 
   mv "${TMP_DOWNLOAD_DIR}/opencode" "$bin_path"
