@@ -2,41 +2,11 @@
 
 set -euo pipefail
 
-releases_path="https://api.github.com/repos/anomalyco/opencode/releases"
+repo_url="https://github.com/anomalyco/opencode.git"
 
-# Build curl arguments as an array to avoid eval
-curl_args=(--retry 10 --retry-delay 2 -sfS)
-if [ -n "${GITHUB_API_TOKEN:-}" ]; then
-  curl_args+=(-H "Authorization: token $GITHUB_API_TOKEN")
-fi
-
-next_link="${releases_path}?per_page=100&page=1"
-all_versions=""
-
-while [ -n "${next_link}" ]; do
-  # Download releases page, capture headers separately
-  header_file=$(mktemp)
-  trap "rm -f '$header_file'" EXIT
-
-  response=$(curl "${curl_args[@]}" -D "$header_file" "$next_link") || {
-    rm -f "$header_file"
-    exit 1
-  }
-
-  # Get versions from response
-  versions=$(echo "$response" | grep '"tag_name"' | cut -d'"' -f4 | sed 's/^v//')
-  all_versions="${versions}"$'\n'"${all_versions}"
-
-  # Get next link from headers (safely parse Link header)
-  next_link=""
-  if grep -qi '^link:' "$header_file"; then
-    # Extract URL marked as rel="next"
-    next_link=$(grep -i '^link:' "$header_file" | sed -n 's/.*<\([^>]*\)>; rel="next".*/\1/p')
-  fi
-
-  rm -f "$header_file"
-  trap - EXIT
-done
+all_versions=$(git ls-remote --tags "$repo_url" | \
+  awk '{print $2}' | \
+  sed -n 's#refs/tags/v\([0-9][0-9.]*\)$#\1#p')
 
 # stolen from https://github.com/rbenv/ruby-build/pull/631/files#diff-fdcfb8a18714b33b07529b7d02b54f1dR942
 sort_versions() {
