@@ -7,6 +7,11 @@ TMPDIR=${TMPDIR:-/tmp}
 [ -n "${ASDF_INSTALL_VERSION:-}" ] || { echo 'Missing ASDF_INSTALL_VERSION' >&2; exit 1; }
 [ -n "${ASDF_INSTALL_PATH:-}" ] || { echo 'Missing ASDF_INSTALL_PATH' >&2; exit 1; }
 
+curl_args=(--retry 10 --retry-delay 2 -sfS)
+if [ -n "${GITHUB_API_TOKEN:-}" ]; then
+  curl_args+=(-H "Authorization: token $GITHUB_API_TOKEN")
+fi
+
 # Compare two semantic versions using portable sort
 # Returns 0 if version1 >= version2, 1 otherwise
 version_gte() {
@@ -41,7 +46,7 @@ get_arch() {
   esac
 }
 
-get_download_url() {
+get_asset_name() {
   local version="$1"
   local platform
   local arch
@@ -57,7 +62,92 @@ get_download_url() {
     fi
   fi
 
-  echo "https://github.com/anomalyco/opencode/releases/download/v${version}/opencode-${platform}-${arch}.${ext}"
+  echo "opencode-${platform}-${arch}.${ext}"
+}
+
+fetch_release_json() {
+  local version="$1"
+
+  curl "${curl_args[@]}" "https://api.github.com/repos/anomalyco/opencode/releases/tags/v${version}"
+}
+
+get_release_asset_metadata() {
+  local release_json="$1"
+  local asset_name="$2"
+
+  printf '%s' "$release_json" | perl -MJSON::PP -e '
+    use strict;
+    use warnings;
+    local $/;
+
+    my $asset_name = shift @ARGV;
+    my $release = decode_json(<>);
+
+    for my $asset (@{$release->{assets} || []}) {
+      next unless ($asset->{name} // q{}) eq $asset_name;
+
+      my $url = $asset->{browser_download_url} // q{};
+      my $digest = $asset->{digest} // q{};
+
+      if ($url eq q{} || $digest eq q{}) {
+        exit 2;
+      }
+
+      print "$url\n$digest\n";
+      exit 0;
+    }
+
+    exit 1;
+  ' "$asset_name"
+}
+
+sha256_file() {
+  local file_path="$1"
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file_path" | awk '{print $1}'
+    return 0
+  fi
+
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file_path" | awk '{print $1}'
+    return 0
+  fi
+
+  echo "No SHA-256 tool found (expected sha256sum or shasum)" >&2
+  exit 1
+}
+
+download_and_verify_asset() {
+  local download_url="$1"
+  local expected_digest="$2"
+  local archive_path="$3"
+  local actual_digest
+  local expected_sha256
+
+  case "$expected_digest" in
+    sha256:*)
+      expected_sha256=${expected_digest#sha256:}
+      ;;
+    '')
+      echo "Release asset digest is missing" >&2
+      exit 1
+      ;;
+    *)
+      echo "Unsupported release asset digest: ${expected_digest}" >&2
+      exit 1
+      ;;
+  esac
+
+  curl -fSL "$download_url" -o "$archive_path"
+
+  actual_digest="$(sha256_file "$archive_path")"
+  if [ "$actual_digest" != "$expected_sha256" ]; then
+    echo "Release asset digest mismatch for ${download_url}" >&2
+    echo "Expected: ${expected_sha256}" >&2
+    echo "Actual:   ${actual_digest}" >&2
+    exit 1
+  fi
 }
 
 install_opencode() {
@@ -65,9 +155,36 @@ install_opencode() {
   local version="$2"
   local install_path="$3"
   local bin_install_path="${install_path}/bin"
+  local asset_name
+  local release_json
+  local asset_metadata
   local download_url
+  local asset_digest
+  local archive_path
 
-  download_url="$(get_download_url "$version")"
+  asset_name="$(get_asset_name "$version")"
+  release_json="$(fetch_release_json "$version")"
+
+  if asset_metadata="$(get_release_asset_metadata "$release_json" "$asset_name")"; then
+    :
+  else
+    status=$?
+    case $status in
+      1)
+        echo "Release asset ${asset_name} not found for v${version}" >&2
+        ;;
+      2)
+        echo "Release asset ${asset_name} is missing required digest metadata" >&2
+        ;;
+      *)
+        echo "Failed to parse release metadata for v${version}" >&2
+        ;;
+    esac
+    exit 1
+  fi
+
+  download_url=$(printf '%s\n' "$asset_metadata" | sed -n '1p')
+  asset_digest=$(printf '%s\n' "$asset_metadata" | sed -n '2p')
 
   # Create a secure temporary directory for download
   # Use global variable so trap can access it
@@ -81,14 +198,14 @@ install_opencode() {
 
   echo "Downloading opencode from ${download_url}"
 
-  # Note: Upstream does not publish checksums, so verification is not possible.
-  # Using --fail to error on HTTP failures instead of downloading error pages.
+  archive_path="${TMP_DOWNLOAD_DIR}/${asset_name}"
+
   if [[ "$download_url" == *.tar.gz ]]; then
-    curl -fSL "$download_url" -o "${TMP_DOWNLOAD_DIR}/opencode.tar.gz"
-    tar -xzf "${TMP_DOWNLOAD_DIR}/opencode.tar.gz" -C "$TMP_DOWNLOAD_DIR"
+    download_and_verify_asset "$download_url" "$asset_digest" "$archive_path"
+    tar -xzf "$archive_path" -C "$TMP_DOWNLOAD_DIR"
   else
-    curl -fSL "$download_url" -o "${TMP_DOWNLOAD_DIR}/opencode.zip"
-    if ! unzip -p "${TMP_DOWNLOAD_DIR}/opencode.zip" "opencode" > "${TMP_DOWNLOAD_DIR}/opencode"; then
+    download_and_verify_asset "$download_url" "$asset_digest" "$archive_path"
+    if ! unzip -p "$archive_path" "opencode" > "${TMP_DOWNLOAD_DIR}/opencode"; then
       echo "Failed to extract opencode from zip" >&2
       exit 1
     fi
