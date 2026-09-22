@@ -8,8 +8,9 @@ TMPDIR=${TMPDIR:-/tmp}
 [ -n "${ASDF_INSTALL_PATH:-}" ] || { echo 'Missing ASDF_INSTALL_PATH' >&2; exit 1; }
 
 curl_args=(--retry 10 --retry-delay 2 -sfS)
+github_curl_args=("${curl_args[@]}")
 if [ -n "${GITHUB_API_TOKEN:-}" ]; then
-  curl_args+=(-H "Authorization: token $GITHUB_API_TOKEN")
+  github_curl_args+=(-H "Authorization: token $GITHUB_API_TOKEN")
 fi
 
 # Compare two semantic versions using portable sort
@@ -46,6 +47,55 @@ get_arch() {
   esac
 }
 
+has_avx2() {
+  local platform
+  platform="$(get_platform)"
+
+  case "$platform" in
+    darwin)
+      [ "$(sysctl -n hw.optional.avx2_0 2>/dev/null || true)" = "1" ]
+      ;;
+    linux)
+      [ -r /proc/cpuinfo ] && grep -Eq '(^|[[:space:]])avx2([[:space:]]|$)' /proc/cpuinfo
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_musl() {
+  [ -f /etc/alpine-release ] || (command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl)
+}
+
+get_npm_package_name() {
+  local platform
+  local arch
+  local package_name
+
+  platform="$(get_platform)"
+  arch="$(get_arch)"
+
+  case "${platform}-${arch}" in
+    darwin-arm64|darwin-x64|linux-arm64|linux-x64)
+      ;;
+    *)
+      echo "OpenCode 2.0 does not provide a binary for ${platform}-${arch}" >&2
+      return 1
+      ;;
+  esac
+
+  package_name="@opencode/cli-${platform}-${arch}"
+  if [ "$arch" = "x64" ] && ! has_avx2; then
+    package_name="${package_name}-baseline"
+  fi
+  if [ "$platform" = "linux" ] && is_musl; then
+    package_name="${package_name}-musl"
+  fi
+
+  echo "$package_name"
+}
+
 get_asset_name() {
   local version="$1"
   local platform
@@ -68,7 +118,16 @@ get_asset_name() {
 fetch_release_json() {
   local version="$1"
 
-  curl "${curl_args[@]}" "https://api.github.com/repos/anomalyco/opencode/releases/tags/v${version}"
+  curl "${github_curl_args[@]}" "https://api.github.com/repos/anomalyco/opencode/releases/tags/v${version}"
+}
+
+fetch_npm_package_json() {
+  local package_name="$1"
+  local version="$2"
+  local encoded_package_name
+
+  encoded_package_name=${package_name/\//%2f}
+  curl "${curl_args[@]}" "https://registry.npmjs.org/${encoded_package_name}/${version}"
 }
 
 get_release_asset_metadata() {
@@ -101,6 +160,26 @@ get_release_asset_metadata() {
   ' "$asset_name"
 }
 
+get_npm_tarball_metadata() {
+  local package_json="$1"
+
+  printf '%s' "$package_json" | perl -MJSON::PP -e '
+    use strict;
+    use warnings;
+    local $/;
+
+    my $package = decode_json(<>);
+    my $url = $package->{dist}{tarball} // q{};
+    my $integrity = $package->{dist}{integrity} // q{};
+
+    if ($url eq q{} || $integrity eq q{}) {
+      exit 1;
+    }
+
+    print "$url\n$integrity\n";
+  '
+}
+
 sha256_file() {
   local file_path="$1"
 
@@ -118,16 +197,40 @@ sha256_file() {
   exit 1
 }
 
+sha512_file() {
+  local file_path="$1"
+
+  if command -v sha512sum >/dev/null 2>&1; then
+    sha512sum "$file_path" | awk '{print $1}'
+    return 0
+  fi
+
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 512 "$file_path" | awk '{print $1}'
+    return 0
+  fi
+
+  echo "No SHA-512 tool found (expected sha512sum or shasum)" >&2
+  exit 1
+}
+
 download_and_verify_asset() {
   local download_url="$1"
   local expected_digest="$2"
   local archive_path="$3"
   local actual_digest
-  local expected_sha256
+  local digest_algorithm
+  local expected_hash
 
   case "$expected_digest" in
     sha256:*)
-      expected_sha256=${expected_digest#sha256:}
+      digest_algorithm="sha256"
+      expected_hash=${expected_digest#sha256:}
+      ;;
+    sha512-*)
+      digest_algorithm="sha512"
+      expected_hash=$(perl -MMIME::Base64=decode_base64 -e \
+        'print unpack("H*", decode_base64($ARGV[0]))' "${expected_digest#sha512-}")
       ;;
     '')
       echo "Release asset digest is missing" >&2
@@ -139,19 +242,26 @@ download_and_verify_asset() {
       ;;
   esac
 
-  curl -fSL "$download_url" -o "$archive_path"
+  curl "${curl_args[@]}" -L "$download_url" -o "$archive_path"
 
-  actual_digest="$(sha256_file "$archive_path")"
-  if [ "$actual_digest" != "$expected_sha256" ]; then
+  case "$digest_algorithm" in
+    sha256)
+      actual_digest="$(sha256_file "$archive_path")"
+      ;;
+    sha512)
+      actual_digest="$(sha512_file "$archive_path")"
+      ;;
+  esac
+
+  if [ "$actual_digest" != "$expected_hash" ]; then
     echo "Release asset digest mismatch for ${download_url}" >&2
-    echo "Expected: ${expected_sha256}" >&2
+    echo "Expected: ${expected_hash}" >&2
     echo "Actual:   ${actual_digest}" >&2
     exit 1
   fi
 }
 
 install_opencode() {
-  local install_type="$1"
   local version="$2"
   local install_path="$3"
   local bin_install_path="${install_path}/bin"
@@ -161,26 +271,43 @@ install_opencode() {
   local download_url
   local asset_digest
   local archive_path
+  local source_bin_path
+  local npm_package_name
+  local package_json
+  local status
 
-  asset_name="$(get_asset_name "$version")"
-  release_json="$(fetch_release_json "$version")"
-
-  if asset_metadata="$(get_release_asset_metadata "$release_json" "$asset_name")"; then
-    :
+  if version_gte "$version" "2.0.0"; then
+    npm_package_name="$(get_npm_package_name)"
+    asset_name="${npm_package_name##*/}-${version}.tgz"
+    if ! package_json="$(fetch_npm_package_json "$npm_package_name" "$version")"; then
+      echo "npm package ${npm_package_name}@${version} not found" >&2
+      exit 1
+    fi
+    if ! asset_metadata="$(get_npm_tarball_metadata "$package_json")"; then
+      echo "npm package ${npm_package_name}@${version} is missing tarball integrity metadata" >&2
+      exit 1
+    fi
   else
-    status=$?
-    case $status in
-      1)
-        echo "Release asset ${asset_name} not found for v${version}" >&2
-        ;;
-      2)
-        echo "Release asset ${asset_name} is missing required digest metadata" >&2
-        ;;
-      *)
-        echo "Failed to parse release metadata for v${version}" >&2
-        ;;
-    esac
-    exit 1
+    asset_name="$(get_asset_name "$version")"
+    release_json="$(fetch_release_json "$version")"
+
+    if asset_metadata="$(get_release_asset_metadata "$release_json" "$asset_name")"; then
+      :
+    else
+      status=$?
+      case $status in
+        1)
+          echo "Release asset ${asset_name} not found for v${version}" >&2
+          ;;
+        2)
+          echo "Release asset ${asset_name} is missing required digest metadata" >&2
+          ;;
+        *)
+          echo "Failed to parse release metadata for v${version}" >&2
+          ;;
+      esac
+      exit 1
+    fi
   fi
 
   download_url=$(printf '%s\n' "$asset_metadata" | sed -n '1p')
@@ -200,18 +327,27 @@ install_opencode() {
 
   archive_path="${TMP_DOWNLOAD_DIR}/${asset_name}"
 
-  if [[ "$download_url" == *.tar.gz ]]; then
+  if version_gte "$version" "2.0.0"; then
+    download_and_verify_asset "$download_url" "$asset_digest" "$archive_path"
+    if ! tar -xzf "$archive_path" -C "$TMP_DOWNLOAD_DIR" package/bin/opencode; then
+      echo "Failed to extract opencode from npm tarball" >&2
+      exit 1
+    fi
+    source_bin_path="${TMP_DOWNLOAD_DIR}/package/bin/opencode"
+  elif [[ "$download_url" == *.tar.gz ]]; then
     download_and_verify_asset "$download_url" "$asset_digest" "$archive_path"
     tar -xzf "$archive_path" -C "$TMP_DOWNLOAD_DIR"
+    source_bin_path="${TMP_DOWNLOAD_DIR}/opencode"
   else
     download_and_verify_asset "$download_url" "$asset_digest" "$archive_path"
     if ! unzip -p "$archive_path" "opencode" > "${TMP_DOWNLOAD_DIR}/opencode"; then
       echo "Failed to extract opencode from zip" >&2
       exit 1
     fi
+    source_bin_path="${TMP_DOWNLOAD_DIR}/opencode"
   fi
 
-  mv "${TMP_DOWNLOAD_DIR}/opencode" "$bin_path"
+  mv "$source_bin_path" "$bin_path"
   chmod +x "$bin_path"
 
   rm -rf "$TMP_DOWNLOAD_DIR"

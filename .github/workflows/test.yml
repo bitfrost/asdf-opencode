@@ -17,6 +17,8 @@ jobs:
           - macos-latest
         version:
           - latest
+          # Test the last 1.x release path that uses GitHub release assets
+          - "1.18.30"
           # Test an old version that uses .zip on Linux (pre-1.0.92)
           - "1.0.91"
     runs-on: ${{ matrix.os }}
